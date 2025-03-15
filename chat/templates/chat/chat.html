@@ -1,0 +1,381 @@
+{% extends 'chat/base.html' %}
+
+{% block title %}Chat with {{ other_user.username }} - Live Chat{% endblock %}
+
+{% block extra_css %}
+<!-- Add Font Awesome CDN -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+{% endblock %}
+
+{% block content %}
+<style>
+    .chat-container {
+        height: 400px;
+        overflow-y: auto;
+        padding: 15px;
+    }
+    
+    .message {
+        margin-bottom: 15px;
+        max-width: 70%;
+        clear: both;
+    }
+    
+    .message.sent {
+        float: right;
+        text-align: right;
+    }
+    
+    .message.received {
+        float: left;
+        text-align: left;
+    }
+    
+    .message .content {
+        padding: 10px 15px;
+        border-radius: 15px;
+        display: inline-block;
+        margin-bottom: 5px;
+        word-wrap: break-word;
+    }
+    
+    .message.sent .content {
+        background-color: #007bff;
+        color: white;
+        border-top-right-radius: 5px;
+    }
+    
+    .message.received .content {
+        background-color: #e9ecef;
+        color: #212529;
+        border-top-left-radius: 5px;
+    }
+    
+    .message .timestamp {
+        display: block;
+        font-size: 0.75rem;
+        color: #6c757d;
+        margin-top: 2px;
+    }
+    
+    .message .file-attachment {
+        margin: 5px 0;
+        max-width: 300px;
+    }
+    
+    .message .file-attachment img {
+        max-width: 100%;
+        border-radius: 10px;
+        cursor: pointer;
+    }
+    
+    .message .file-attachment video {
+        max-width: 100%;
+        border-radius: 10px;
+    }
+    
+    .message .file-attachment audio {
+        width: 100%;
+    }
+    
+    /* Clear floats after messages */
+    .chat-container::after {
+        content: "";
+        clear: both;
+        display: table;
+    }
+</style>
+
+{% if user.is_authenticated %}
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <div>
+                <h4 class="mb-0">{{ other_user.username }}</h4>
+                <small class="text-muted" id="typing-status"></small>
+            </div>
+            <div class="d-flex align-items-center">
+                <a href="{% url 'chat:voice_call' other_user.username %}" class="btn btn-outline-primary me-2">
+                    <i class="fas fa-phone-alt"></i> Voice Call
+                </a>
+                <span id="connection-status" class="badge bg-warning">Connecting...</span>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="chat-container" id="chat-messages">
+                {% for message in messages %}
+                <div class="message {% if message.sender == user %}sent{% else %}received{% endif %}">
+                    {% if message.content %}
+                        <span class="content">{{ message.content }}</span>
+                    {% endif %}
+                    {% if message.file %}
+                        <div class="file-attachment">
+                            {% with file_ext=message.file_name|lower %}
+                                {% if file_ext|slice:"-4:" in '.jpg,.png,.gif,.jpeg,.webp' %}
+                                    <img src="{{ message.file.url }}" alt="{{ message.file_name }}" onclick="window.open(this.src)">
+                                {% elif file_ext|slice:"-4:" in '.mp4,.webm,.ogg' %}
+                                    <video controls>
+                                        <source src="{{ message.file.url }}" type="video/{{ file_ext|slice:'1:' }}">
+                                        Your browser does not support the video tag.
+                                    </video>
+                                {% elif file_ext|slice:"-4:" in '.mp3,.wav,.ogg' %}
+                                    <audio controls>
+                                        <source src="{{ message.file.url }}" type="audio/{{ file_ext|slice:'1:' }}">
+                                        Your browser does not support the audio tag.
+                                    </audio>
+                                {% else %}
+                                    <a href="{{ message.file.url }}" target="_blank" class="btn btn-sm btn-outline-primary">
+                                        <i class="fas fa-file"></i> {{ message.file_name }}
+                                    </a>
+                                {% endif %}
+                            {% endwith %}
+                        </div>
+                    {% endif %}
+                    <span class="timestamp">{{ message.timestamp|date:"g:i A" }}</span>
+                </div>
+                {% endfor %}
+            </div>
+            <form id="chat-form" class="mt-3">
+                {% csrf_token %}
+                <div class="input-group">
+                    <input type="text" id="chat-message-input" class="form-control" placeholder="Type your message...">
+                    <label class="btn btn-outline-secondary" for="file-upload">
+                        <i class="fas fa-paperclip"></i>
+                        <input type="file" id="file-upload" style="display: none;" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.txt">
+                    </label>
+                    <button class="btn btn-primary" type="submit">Send</button>
+                </div>
+                <small id="file-name" class="form-text text-muted"></small>
+                <div id="upload-error" class="alert alert-danger mt-2" style="display: none;"></div>
+            </form>
+        </div>
+    </div>
+{% else %}
+    <div class="alert alert-warning">
+        Please <a href="{% url 'login' %}?next={{ request.path }}">login</a> to chat.
+    </div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+{% if user.is_authenticated %}
+<script>
+    const otherUsername = "{{ other_user.username }}";
+    const username = "{{ user.username }}";
+    const connectionStatus = document.getElementById('connection-status');
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 5;
+    let selectedFile = null;
+    
+    // File upload configuration
+    const config = {
+        maxFileSize: {{ max_upload_size }},
+        allowedFileTypes: {{ allowed_file_types|safe }},
+        uploadUrl: "{% url 'chat:upload_file' %}",
+        csrfToken: document.querySelector('[name=csrfmiddlewaretoken]').value
+    };
+
+    document.getElementById('file-upload').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) {
+            selectedFile = null;
+            document.getElementById('file-name').textContent = '';
+            return;
+        }
+
+        // Validate file size
+        if (file.size > config.maxFileSize) {
+            document.getElementById('upload-error').textContent = 'File size exceeds 5MB limit';
+            document.getElementById('upload-error').style.display = 'block';
+            selectedFile = null;
+            return;
+        }
+
+        // Validate file type
+        const fileType = file.name.split('.').pop().toLowerCase();
+        if (!config.allowedFileTypes.includes(fileType)) {
+            document.getElementById('upload-error').textContent = 'File type not allowed';
+            document.getElementById('upload-error').style.display = 'block';
+            selectedFile = null;
+            return;
+        }
+
+        selectedFile = file;
+        document.getElementById('file-name').textContent = file.name;
+        document.getElementById('upload-error').style.display = 'none';
+    });
+    
+    function connect() {
+        const wsScheme = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+        const wsUrl = wsScheme + window.location.host + '/ws/chat/' + otherUsername + '/';
+        console.log('Attempting to connect to:', wsUrl);
+        
+        const chatSocket = new WebSocket(wsUrl);
+        const messageContainer = document.querySelector('#chat-messages');
+        const messageInput = document.querySelector('#chat-message-input');
+        const chatForm = document.querySelector('#chat-form');
+
+        messageInput.disabled = true;
+
+        chatSocket.onopen = function() {
+            console.log('WebSocket connection established');
+            connectionStatus.textContent = 'Connected';
+            connectionStatus.className = 'badge bg-success';
+            messageInput.disabled = false;
+            reconnectAttempts = 0;
+        };
+
+        chatSocket.onmessage = function(e) {
+            console.log('Message received:', e.data);
+            const data = JSON.parse(e.data);
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${data.username === username ? 'sent' : 'received'}`;
+            
+            let messageContent = '';
+            
+            if (data.message) {
+                messageContent += `<span class="content">${data.message}</span>`;
+            }
+            
+            if (data.file_url) {
+                const fileExt = data.file_name.toLowerCase().split('.').pop();
+                const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(fileExt);
+                const isVideo = ['mp4', 'webm', 'ogg'].includes(fileExt);
+                const isAudio = ['mp3', 'wav', 'ogg'].includes(fileExt);
+                
+                messageContent += '<div class="file-attachment">';
+                
+                if (isImage) {
+                    messageContent += `<img src="${data.file_url}" alt="${data.file_name}" onclick="window.open(this.src)">`;
+                } else if (isVideo) {
+                    messageContent += `
+                        <video controls>
+                            <source src="${data.file_url}" type="video/${fileExt}">
+                            Your browser does not support the video tag.
+                        </video>`;
+                } else if (isAudio) {
+                    messageContent += `
+                        <audio controls>
+                            <source src="${data.file_url}" type="audio/${fileExt}">
+                            Your browser does not support the audio tag.
+                        </audio>`;
+                } else {
+                    messageContent += `
+                        <a href="${data.file_url}" target="_blank" class="btn btn-sm btn-outline-primary">
+                            <i class="fas fa-file"></i> ${data.file_name}
+                        </a>`;
+                }
+                
+                messageContent += '</div>';
+            }
+            
+            messageContent += `<span class="timestamp">${new Date().toLocaleTimeString([], {hour: 'numeric', minute:'2-digit'})}</span>`;
+            
+            messageDiv.innerHTML = messageContent;
+            messageContainer.appendChild(messageDiv);
+            messageContainer.scrollTop = messageContainer.scrollHeight;
+        };
+
+        chatSocket.onclose = function(e) {
+            console.error('WebSocket closed:', e.code, e.reason);
+            connectionStatus.textContent = 'Disconnected';
+            connectionStatus.className = 'badge bg-danger';
+            messageInput.disabled = true;
+            
+            if (reconnectAttempts < maxReconnectAttempts) {
+                reconnectAttempts++;
+                const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
+                console.log(`Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${maxReconnectAttempts})`);
+                setTimeout(connect, delay);
+            } else {
+                connectionStatus.textContent = 'Connection Failed';
+                console.error('Max reconnection attempts reached');
+            }
+        };
+
+        chatSocket.onerror = function(e) {
+            console.error('WebSocket error:', e);
+            connectionStatus.textContent = 'Error';
+            connectionStatus.className = 'badge bg-danger';
+        };
+
+        chatForm.onsubmit = async function(e) {
+            e.preventDefault();
+            const message = messageInput.value.trim();
+            
+            // Don't send if socket is not open
+            if (chatSocket.readyState !== WebSocket.OPEN) {
+                return;
+            }
+            
+            // Don't send if both message and file are empty
+            if (!message && !selectedFile) {
+                return;
+            }
+
+            try {
+                if (selectedFile) {
+                    const formData = new FormData();
+                    formData.append('file', selectedFile);
+                    formData.append('receiver', otherUsername);
+                    formData.append('message', message);
+
+                    const response = await fetch(config.uploadUrl, {
+                        method: 'POST',
+                        body: formData,
+                        headers: {
+                            'X-CSRFToken': config.csrfToken
+                        }
+                    });
+
+                    if (!response.ok) {
+                        const errorData = await response.json();
+                        throw new Error(errorData.error || 'File upload failed');
+                    }
+
+                    const data = await response.json();
+                    chatSocket.send(JSON.stringify({
+                        'message': message,
+                        'username': username,
+                        'file_url': data.file_url,
+                        'file_name': data.file_name
+                    }));
+                } else {
+                    // Only send if message is not empty
+                    if (message) {
+                        chatSocket.send(JSON.stringify({
+                            'message': message,
+                            'username': username
+                        }));
+                    }
+                }
+
+                messageInput.value = '';
+                selectedFile = null;
+                document.getElementById('file-name').textContent = '';
+                document.getElementById('file-upload').value = '';
+                document.getElementById('upload-error').style.display = 'none';
+            } catch (error) {
+                console.error('Error sending message:', error);
+                document.getElementById('upload-error').textContent = error.message || 'Failed to send message or upload file';
+                document.getElementById('upload-error').style.display = 'block';
+            }
+        };
+
+        // Clean up function
+        return function cleanup() {
+            console.log('Cleaning up WebSocket connection');
+            chatSocket.close();
+        };
+    }
+
+    // Initial connection
+    const cleanup = connect();
+
+    // Clean up on page unload
+    window.addEventListener('unload', cleanup);
+
+    // Auto-scroll to bottom on page load
+    document.querySelector('#chat-messages').scrollTop = document.querySelector('#chat-messages').scrollHeight;
+</script>
+{% endif %}
+{% endblock %} 

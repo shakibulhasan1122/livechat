@@ -1,0 +1,163 @@
+{% extends 'chat/base.html' %}
+
+{% block title %}Conversations - Live Chat{% endblock %}
+
+{% block content %}
+{% if user.is_authenticated %}
+    <div class="row">
+        <div class="col-md-8 mx-auto">
+            <div class="card">
+                <div class="card-header">
+                    <h4 class="mb-0">Conversations</h4>
+                </div>
+                <div class="card-body p-0">
+                    <div class="list-group list-group-flush" id="conversation-list">
+                        {% for conv in conversations %}
+                            <a href="{% url 'chat:chat' conv.user.username %}" class="list-group-item list-group-item-action" data-username="{{ conv.user.username }}">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <div>
+                                        <h5 class="mb-1">{{ conv.user.username }}</h5>
+                                        {% if conv.last_message %}
+                                            <small class="text-muted">
+                                                {% if conv.last_message.sender == user %}
+                                                    You:
+                                                {% else %}
+                                                    {{ conv.last_message.sender.username }}:
+                                                {% endif %}
+                                                {% if conv.last_message.file %}
+                                                    <i class="fas fa-paperclip"></i> File
+                                                {% else %}
+                                                    {{ conv.last_message.content|truncatechars:50 }}
+                                                {% endif %}
+                                            </small>
+                                        {% else %}
+                                            <small class="text-muted">No messages yet</small>
+                                        {% endif %}
+                                    </div>
+                                    {% if conv.unread_count > 0 %}
+                                        <span class="badge bg-primary rounded-pill">{{ conv.unread_count }}</span>
+                                    {% endif %}
+                                </div>
+                            </a>
+                        {% empty %}
+                            <div class="list-group-item text-center text-muted" id="no-conversations">
+                                No other users found
+                            </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+{% else %}
+    <div class="alert alert-warning">
+        Please <a href="{% url 'login' %}">login</a> to see your conversations.
+    </div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+{% if user.is_authenticated %}
+<script>
+    // Function to play notification sound
+    function playNotificationSound() {
+        try {
+            const notificationSound = document.getElementById('notification-sound');
+            if (notificationSound && document.hasInteractedWithPage) {
+                // Reset the audio to the beginning
+                notificationSound.currentTime = 0;
+                notificationSound.volume = 0.5;
+                
+                // Play the sound
+                const playPromise = notificationSound.play();
+                
+                // Handle potential play() promise rejection
+                if (playPromise !== undefined) {
+                    playPromise.catch(error => {
+                        console.error('Error playing notification sound in index:', error);
+                        if (error.name === 'NotAllowedError') {
+                            document.hasInteractedWithPage = false;
+                        }
+                    });
+                }
+            } else {
+                console.log('Notification sound not available or waiting for user interaction');
+            }
+        } catch (error) {
+            console.error('Notification sound error in index:', error);
+        }
+    }
+
+    // Function to update the conversation list when a new message arrives
+    function indexUpdateConversationList(data) {
+        const conversationList = document.getElementById('conversation-list');
+        if (!conversationList) return;
+        
+        // Play notification sound when a new message arrives
+        playNotificationSound();
+        
+        // Find if there's already a conversation with this sender
+        const existingConversation = document.querySelector(`[data-username="${data.sender}"]`);
+        
+        if (existingConversation) {
+            // Update the last message
+            const messagePreview = existingConversation.querySelector('small.text-muted');
+            messagePreview.innerHTML = `${data.sender}: ${data.message}`;
+            
+            // Update or add unread badge
+            let badge = existingConversation.querySelector('.badge');
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = 'badge bg-primary rounded-pill';
+                existingConversation.querySelector('.d-flex').appendChild(badge);
+            }
+            
+            const count = parseInt(badge.textContent || '0') + 1;
+            badge.textContent = count;
+            
+            // Move this conversation to the top
+            conversationList.insertBefore(existingConversation, conversationList.firstChild);
+        } else {
+            // If this is a new conversation, we'll create a new entry
+            const noConversations = document.getElementById('no-conversations');
+            if (noConversations) {
+                noConversations.style.display = 'none';
+            }
+            
+            const newConversation = document.createElement('a');
+            newConversation.href = `/chat/${data.sender}/`;
+            newConversation.className = 'list-group-item list-group-item-action';
+            newConversation.setAttribute('data-username', data.sender);
+            
+            newConversation.innerHTML = `
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h5 class="mb-1">${data.sender}</h5>
+                        <small class="text-muted">${data.sender}: ${data.message}</small>
+                    </div>
+                    <span class="badge bg-primary rounded-pill">1</span>
+                </div>
+            `;
+            
+            // Add to the top of the list
+            if (conversationList.firstChild) {
+                conversationList.insertBefore(newConversation, conversationList.firstChild);
+            } else {
+                conversationList.appendChild(newConversation);
+            }
+        }
+    }
+    
+    // Override the base template's updateConversationList function
+    // Listen for notification events from the parent
+    document.addEventListener('DOMContentLoaded', function() {
+        // Set up a custom event listener for notifications
+        document.addEventListener('newNotification', function(e) {
+            if (e.detail && e.detail.data) {
+                indexUpdateConversationList(e.detail.data);
+            }
+        });
+    });
+</script>
+{% endif %}
+{% endblock %} 

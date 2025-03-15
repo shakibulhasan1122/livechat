@@ -1,0 +1,449 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Live Chat{% endblock %}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    {% block extra_css %}{% endblock %}
+    <style>
+        .chat-container {
+            height: 400px;
+            overflow-y: auto;
+            border: 1px solid #dee2e6;
+            border-radius: 0.25rem;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        .message {
+            margin-bottom: 0.5rem;
+        }
+        .message .username {
+            font-weight: bold;
+            margin-right: 0.5rem;
+        }
+        .message .timestamp {
+            color: #6c757d;
+            font-size: 0.875rem;
+        }
+        /* Notification styles */
+        #notification-dropdown {
+            max-height: 300px;
+            overflow-y: auto;
+            padding: 0;
+            min-width: 300px;
+        }
+        .notification-item {
+            padding: 10px 15px;
+            border-bottom: 1px solid #dee2e6;
+            white-space: normal;
+        }
+        .notification-item:last-child {
+            border-bottom: none;
+        }
+        .notification-item.unread {
+            background-color: #f8f9fa;
+        }
+        .notification-item .message-preview {
+            color: #6c757d;
+            font-size: 0.875rem;
+            margin: 5px 0 0;
+        }
+        .notification-item .timestamp {
+            color: #6c757d;
+            font-size: 0.75rem;
+        }
+        .notification-badge {
+            position: absolute;
+            top: 0;
+            right: 0;
+            transform: translate(50%, -50%);
+        }
+        /* Custom styles */
+        .avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background-color: #007bff;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+        
+        .avatar-lg {
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            background-color: #007bff;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 2.5rem;
+            margin: 0 auto;
+        }
+        
+        .avatar-text {
+            text-transform: uppercase;
+        }
+
+        /* Ringing animation for avatar */
+        @keyframes ringing {
+            0% { transform: rotate(-5deg); }
+            25% { transform: rotate(5deg); }
+            50% { transform: rotate(-5deg); }
+            75% { transform: rotate(5deg); }
+            100% { transform: rotate(-5deg); }
+        }
+
+        .ringing {
+            animation: ringing 0.5s infinite;
+        }
+    </style>
+</head>
+<body>
+    <!-- Preload notification sound -->
+    {% if user.is_authenticated %}
+    <audio id="notification-sound" preload="auto">
+        <source src="/static/notification.wav" type="audio/mpeg">
+    </audio>
+    {% endif %}
+
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+        <div class="container">
+            <a class="navbar-brand" href="{% url 'chat:index' %}">Live Chat</a>
+            <div class="navbar-nav ms-auto">
+                {% if user.is_authenticated %}
+                    <div class="nav-item dropdown me-3">
+                        <a class="nav-link position-relative" href="#" id="notificationDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+                            <i class="fas fa-bell"></i>
+                            <span class="badge rounded-pill bg-danger notification-badge" id="notification-count" style="display: none;">0</span>
+                        </a>
+                        <ul class="dropdown-menu dropdown-menu-end" id="notification-dropdown" aria-labelledby="notificationDropdown">
+                            <li class="dropdown-item text-center text-muted" id="no-notifications">No new notifications</li>
+                        </ul>
+                    </div>
+                    <span class="nav-item nav-link text-light">Welcome, {{ user.username }}</span>
+                    <a class="nav-item nav-link" href="{% url 'logout' %}">Logout</a>
+                {% else %}
+                    <a class="nav-item nav-link" href="{% url 'login' %}">Login</a>
+                {% endif %}
+            </div>
+        </div>
+    </nav>
+
+    <div class="container">
+        {% block content %}
+        {% endblock %}
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    {% block extra_js %}{% endblock %}
+
+    {% if user.is_authenticated %}
+    <script>
+        let notificationSocket = null;
+        let unreadCount = 0;
+        const notificationDropdown = document.getElementById('notification-dropdown');
+        const notificationCount = document.getElementById('notification-count');
+        const noNotifications = document.getElementById('no-notifications');
+        const notificationSound = document.getElementById('notification-sound');
+
+        function connectNotificationSocket() {
+            const wsScheme = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+            const notificationSocketUrl = wsScheme + window.location.host + '/ws/notifications/';
+            
+            notificationSocket = new WebSocket(notificationSocketUrl);
+            
+            notificationSocket.onopen = function(e) {
+                console.log('Notification socket connected');
+            };
+            
+            notificationSocket.onmessage = function(e) {
+                const data = JSON.parse(e.data);
+                handleNotification(data);
+            };
+
+            notificationSocket.onclose = function(e) {
+                console.log('Notification socket closed unexpectedly');
+                setTimeout(connectNotificationSocket, 1000);
+            };
+            
+            notificationSocket.onerror = function(e) {
+                console.error('Notification socket error:', e);
+            };
+        }
+
+        function handleNotification(data) {
+            // Create notification item
+            const notificationItem = document.createElement('div');
+            notificationItem.className = 'dropdown-item notification-item unread';
+            
+            // Handle different notification types
+            if (data.notification_type === 'missed_call') {
+                // Missed call notification
+                const content = `
+                    <div class="d-flex align-items-center">
+                        <div class="avatar me-3">
+                            <span class="avatar-text">${data.from_user.charAt(0).toUpperCase()}</span>
+                        </div>
+                        <div>
+                            <p class="mb-0"><strong>${data.from_user}</strong></p>
+                            <p class="message-preview mb-0">${data.message}</p>
+                            <a href="/chat/${data.from_user}/voice/" class="btn btn-sm btn-outline-primary mt-1">
+                                <i class="fas fa-phone-alt"></i> Call Back
+                            </a>
+                        </div>
+                    </div>
+                `;
+                notificationItem.innerHTML = content;
+                
+                // Add click handler to navigate to the voice call page
+                notificationItem.addEventListener('click', function(e) {
+                    // Don't navigate if clicking the call back button (it has its own link)
+                    if (!e.target.closest('.btn')) {
+                        window.location.href = '/chat/' + data.from_user + '/';
+                    }
+                });
+            } else if (data.notification_type === 'incoming_call') {
+                // Incoming call notification
+                const content = `
+                    <div class="d-flex align-items-center">
+                        <div class="avatar me-3 ringing">
+                            <span class="avatar-text">${data.from_user.charAt(0).toUpperCase()}</span>
+                        </div>
+                        <div>
+                            <p class="mb-0"><strong>${data.from_user}</strong></p>
+                            <p class="message-preview mb-0">Incoming voice call</p>
+                            <div class="mt-1">
+                                <a href="/chat/${data.from_user}/voice/?incoming=true" class="btn btn-sm btn-success me-1">
+                                    <i class="fas fa-phone-alt"></i> Answer
+                                </a>
+                                <button class="btn btn-sm btn-danger reject-call-btn" data-username="${data.from_user}">
+                                    <i class="fas fa-phone-slash"></i> Decline
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                notificationItem.innerHTML = content;
+                
+                // Play notification sound with higher volume for calls
+                notificationSound.volume = 1.0;
+                
+                // Add event listener for reject button
+                setTimeout(() => {
+                    const rejectBtn = notificationItem.querySelector('.reject-call-btn');
+                    if (rejectBtn) {
+                        rejectBtn.addEventListener('click', function(e) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            
+                            const username = this.getAttribute('data-username');
+                            rejectIncomingCall(username);
+                            
+                            // Remove this notification
+                            notificationItem.remove();
+                            updateUnreadCount();
+                        });
+                    }
+                }, 0);
+            } else {
+                // Regular message notification
+                const content = `
+                    <div class="d-flex align-items-center">
+                        <div class="avatar me-3">
+                            <span class="avatar-text">${data.sender.charAt(0).toUpperCase()}</span>
+                        </div>
+                        <div>
+                            <p class="mb-0"><strong>${data.sender}</strong></p>
+                            <p class="message-preview mb-0">${data.message}</p>
+                        </div>
+                    </div>
+                `;
+                
+                notificationItem.innerHTML = content;
+                
+                // Add click handler to navigate to the chat
+                notificationItem.addEventListener('click', function() {
+                    window.location.href = '/chat/' + data.sender + '/';
+                });
+            }
+
+            // Insert at the top of the list
+            if (notificationDropdown.firstChild) {
+                notificationDropdown.insertBefore(notificationItem, notificationDropdown.firstChild);
+            } else {
+                notificationDropdown.appendChild(notificationItem);
+            }
+
+            // Update unread count
+            unreadCount++;
+            notificationCount.textContent = unreadCount;
+            notificationCount.style.display = 'block';
+
+            // Limit the number of notifications shown
+            const maxNotifications = 10;
+            const notifications = notificationDropdown.getElementsByClassName('notification-item');
+            if (notifications.length > maxNotifications) {
+                notificationDropdown.removeChild(notifications[notifications.length - 1]);
+            }
+
+            // Play notification sound
+            playNotificationSound();
+            
+            // Update conversation list if we're on the index page
+            updateConversationList(data);
+            
+            // Dispatch a custom event for page-specific notification handling
+            document.dispatchEvent(new CustomEvent('newNotification', {
+                detail: { data: data }
+            }));
+        }
+
+        function playNotificationSound() {
+            try {
+                // Reset the audio to the beginning
+                notificationSound.currentTime = 0;
+                notificationSound.volume = 0.5;
+                
+                // Play the sound
+                const playPromise = notificationSound.play();
+                
+                // Handle potential play() promise rejection
+                if (playPromise !== undefined) {
+                    playPromise.catch(error => {
+                        console.error('Error playing notification sound:', error);
+                    });
+                }
+            } catch (error) {
+                console.error('Notification sound error:', error);
+            }
+        }
+        
+        function updateConversationList(data) {
+            // Check if we're on the index page and update the conversation list
+            const conversationList = document.querySelector('.list-group.list-group-flush');
+            if (conversationList) {
+                // Find if there's already a conversation with this sender
+                const conversations = conversationList.querySelectorAll('a.list-group-item');
+                let found = false;
+                
+                for (let i = 0; i < conversations.length; i++) {
+                    const username = conversations[i].querySelector('h5.mb-1').textContent.trim();
+                    if (username === data.sender) {
+                        // Update the last message
+                        const messagePreview = conversations[i].querySelector('small.text-muted');
+                        messagePreview.innerHTML = `${data.sender}: ${data.message}`;
+                        
+                        // Update or add unread badge
+                        let badge = conversations[i].querySelector('.badge');
+                        if (!badge) {
+                            badge = document.createElement('span');
+                            badge.className = 'badge bg-primary rounded-pill';
+                            conversations[i].querySelector('.d-flex').appendChild(badge);
+                        }
+                        
+                        const count = parseInt(badge.textContent || '0') + 1;
+                        badge.textContent = count;
+                        
+                        // Move this conversation to the top
+                        conversationList.insertBefore(conversations[i], conversationList.firstChild);
+                        
+                        found = true;
+                        break;
+                    }
+                }
+                
+                // If no existing conversation, we might want to add a new one
+                // This would require additional data from the server
+            }
+            
+            // Call the page-specific updateConversationList function if it exists
+            // Removed to prevent infinite recursion
+        }
+
+        // Function to reject incoming call from notification
+        function rejectIncomingCall(username) {
+            // Create a temporary WebSocket to send the reject message
+            const tempSocket = new WebSocket(
+                (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + 
+                window.location.host + 
+                '/ws/voice/' + username + '/'
+            );
+            
+            tempSocket.onopen = function() {
+                // Send call-ended message
+                tempSocket.send(JSON.stringify({
+                    'type': 'call-ended'
+                }));
+                
+                // Close the socket after sending
+                setTimeout(() => {
+                    tempSocket.close();
+                }, 500);
+            };
+        }
+
+        // Handle dropdown open/close
+        document.getElementById('notificationDropdown').addEventListener('click', function(e) {
+            e.stopPropagation();
+        });
+        
+        document.addEventListener('click', function(e) {
+            if (e.target.closest('.notification-item')) {
+                e.target.closest('.notification-item').classList.remove('unread');
+                updateUnreadCount();
+            }
+        });
+        
+        function updateUnreadCount() {
+            const unreadItems = notificationDropdown.querySelectorAll('.notification-item.unread');
+            unreadCount = unreadItems.length;
+            
+            if (unreadCount === 0) {
+                notificationCount.style.display = 'none';
+            } else {
+                notificationCount.textContent = unreadCount;
+                notificationCount.style.display = 'block';
+            }
+        }
+
+        // Connect to notification socket when the page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            connectNotificationSocket();
+            
+            // Set interaction flag to false initially
+            document.hasInteractedWithPage = false;
+            
+            // Set the flag to true on various user interactions
+            const interactionEvents = ['click', 'touchstart', 'keydown', 'scroll'];
+            interactionEvents.forEach(eventType => {
+                document.addEventListener(eventType, function() {
+                    document.hasInteractedWithPage = true;
+                    
+                    // Try to initialize audio on first interaction
+                    if (notificationSound && !notificationSound.initialized) {
+                        notificationSound.initialized = true;
+                        notificationSound.play().then(() => {
+                            notificationSound.pause();
+                            notificationSound.currentTime = 0;
+                            console.log('Audio initialized successfully');
+                        }).catch(e => {
+                            console.log('Audio init error:', e);
+                            // If initialization fails, we'll try again later
+                            notificationSound.initialized = false;
+                        });
+                    }
+                }, { once: false });
+            });
+        });
+    </script>
+    {% endif %}
+</body>
+</html> 

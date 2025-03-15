@@ -1,0 +1,9 @@
+# Ignore environment variables
+.env
+*.pyc
+__pycache__/
+
+
+
+# Ignore virtual environment
+venv/

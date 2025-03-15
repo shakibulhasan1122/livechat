@@ -1,0 +1,1089 @@
+{% extends 'chat/base.html' %}
+
+{% block title %}Voice Call with {{ other_user.username }}{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <!-- Incoming Call Popup -->
+    <div id="call-popup" class="call-popup" style="display: none;">
+        <div class="call-popup-content">
+            <div class="text-center mb-3">
+                <div class="avatar-lg mb-3">
+                    <span class="avatar-text">{{ other_user.username|first|upper }}</span>
+                </div>
+                <h4>Incoming Call</h4>
+                <p class="mb-3">{{ other_user.username }} is calling you</p>
+                <div class="call-popup-buttons">
+                    <button id="accept-call-btn" class="btn btn-success btn-lg mx-2">
+                        <i class="fas fa-phone-alt"></i> Accept
+                    </button>
+                    <button id="reject-call-btn" class="btn btn-danger btn-lg mx-2">
+                        <i class="fas fa-phone-slash"></i> Reject
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-md-8 mx-auto">
+            <div class="card">
+                <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Voice Call with {{ other_user.username }}</h5>
+                    <div>
+                        <span id="call-status" class="badge bg-secondary">Initializing...</span>
+                        <a href="{% url 'chat:chat' other_user.username %}" class="btn btn-sm btn-light ms-2">
+                            <i class="fas fa-comment"></i> Back to Chat
+                        </a>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="text-center mb-4">
+                        <div id="remote-avatar" class="avatar-lg mb-3">
+                            <span class="avatar-text">{{ other_user.username|first|upper }}</span>
+                        </div>
+                        <h4 id="remote-username">{{ other_user.username }}</h4>
+                    </div>
+                    
+                    <div class="call-controls text-center">
+                        <button id="test-mic-button" class="btn btn-outline-secondary btn-lg mx-2 mb-3">
+                            <i class="fas fa-microphone-alt"></i> Test Microphone
+                        </button>
+                        <div id="mic-test-result" class="alert alert-info mb-3" style="display: none;"></div>
+                        
+                        <div>
+                            <button id="call-button" class="btn btn-success btn-lg mx-2">
+                                <i class="fas fa-phone-alt"></i> Start Call
+                            </button>
+                            <button id="hangup-button" class="btn btn-danger btn-lg mx-2" disabled>
+                                <i class="fas fa-phone-slash"></i> End Call
+                            </button>
+                            <button id="mute-button" class="btn btn-secondary btn-lg mx-2" disabled>
+                                <i class="fas fa-microphone"></i> Mute
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="alert alert-info mt-4">
+                        <p><strong>Note:</strong> Voice calling requires microphone access. Please allow when prompted.</p>
+                    </div>
+                    
+                    <!-- Audio elements (hidden) -->
+                    <audio id="remote-audio" autoplay></audio>
+                    <audio id="local-audio" muted autoplay></audio>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // WebRTC configuration
+    const configuration = {
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' }
+        ]
+    };
+    
+    // Variables
+    let localStream;
+    let peerConnection;
+    let callButton = document.getElementById('call-button');
+    let hangupButton = document.getElementById('hangup-button');
+    let muteButton = document.getElementById('mute-button');
+    let testMicButton = document.getElementById('test-mic-button');
+    let micTestResult = document.getElementById('mic-test-result');
+    let callStatus = document.getElementById('call-status');
+    let remoteAudio = document.getElementById('remote-audio');
+    let localAudio = document.getElementById('local-audio');
+    let callPopup = document.getElementById('call-popup');
+    let acceptCallBtn = document.getElementById('accept-call-btn');
+    let rejectCallBtn = document.getElementById('reject-call-btn');
+    let isMuted = false;
+    let testStream = null;
+    let audioContext = null;
+    let audioAnalyser = null;
+    let testInterval = null;
+
+    // Store this in window to ensure it persists between function calls
+    window.incomingCallData = null;
+    
+    // Using a CDN-hosted ringtone sound
+    let ringtoneAudio = new Audio('https://cdn.pixabay.com/download/audio/2022/03/15/audio_c8c8a73467.mp3');
+    ringtoneAudio.loop = true;
+    
+    // WebSocket connection
+    const otherUsername = "{{ other_user.username }}";
+    let callSocket = null;
+    
+    // Check if we're coming from a notification (URL parameter)
+    const urlParams = new URLSearchParams(window.location.search);
+    const fromNotification = urlParams.get('incoming') === 'true';
+    let waitingForOffer = false;
+    let connectionAttempts = 0;
+    const maxConnectionAttempts = 5;
+    
+    // Function to connect to WebSocket
+    function connectWebSocket() {
+        if (connectionAttempts >= maxConnectionAttempts) {
+            callStatus.textContent = "Connection failed";
+            callStatus.className = "badge bg-danger";
+            return;
+        }
+        
+        connectionAttempts++;
+        
+        callSocket = new WebSocket(
+            (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + 
+            window.location.host + 
+            '/ws/voice/' + otherUsername + '/'
+        );
+        
+        callSocket.onopen = function(e) {
+            console.log("WebSocket connection established");
+            callStatus.textContent = "Ready to call";
+            callStatus.className = "badge bg-success";
+            connectionAttempts = 0;
+            
+            // If we're coming from a notification, we need to wait for the offer
+            if (fromNotification) {
+                callStatus.textContent = "Waiting for call data...";
+                callStatus.className = "badge bg-warning";
+                waitingForOffer = true;
+                
+                // Set a timeout in case we don't receive the offer
+                setTimeout(() => {
+                    if (waitingForOffer) {
+                        handleMissedNotificationCall();
+                    }
+                }, 10000);
+            } else {
+                // Check for microphone access on page load
+                checkMicrophoneAccess();
+            }
+        };
+        
+        callSocket.onmessage = function(e) {
+            const data = JSON.parse(e.data);
+            console.log("Message received:", data);
+            
+            switch(data.type) {
+                case 'offer':
+                    console.log("Received offer:", data.offer);
+                    if (waitingForOffer) {
+                        // We were waiting for this offer after navigating from a notification
+                        waitingForOffer = false;
+                        // Auto-accept the call
+                        window.incomingCallData = data;
+                        setTimeout(() => {
+                            console.log("Auto-accepting call with data:", window.incomingCallData);
+                            acceptIncomingCall();
+                        }, 500);
+                    } else {
+                        // Normal flow - show popup
+                        showIncomingCallPopup(data);
+                    }
+                    break;
+                case 'answer':
+                    console.log("Received answer:", data.answer);
+                    handleAnswer(data);
+                    break;
+                case 'ice-candidate':
+                    console.log("Received ICE candidate:", data.candidate);
+                    handleIceCandidate(data);
+                    break;
+                case 'call-ended':
+                    console.log("Received call-ended");
+                    handleCallEnded();
+                    stopRingtone();
+                    hideCallPopup();
+                    break;
+                default:
+                    console.log("Received unknown message type:", data.type);
+            }
+        };
+        
+        callSocket.onclose = function(e) {
+            console.log("WebSocket connection closed", e);
+            
+            // Don't attempt to reconnect if we're intentionally closing
+            if (e.code === 1000) {
+                return;
+            }
+            
+            // Try to reconnect
+            setTimeout(() => {
+                console.log(`Attempting to reconnect (${connectionAttempts}/${maxConnectionAttempts})...`);
+                connectWebSocket();
+            }, 1000);
+        };
+        
+        callSocket.onerror = function(e) {
+            console.error("WebSocket error:", e);
+        };
+    }
+    
+    // Function to safely send WebSocket messages
+    function sendWebSocketMessage(message) {
+        if (!callSocket || callSocket.readyState !== WebSocket.OPEN) {
+            console.error("WebSocket not connected, cannot send message:", message);
+            callStatus.textContent = "Connection error";
+            callStatus.className = "badge bg-danger";
+            
+            // Try to reconnect
+            connectWebSocket();
+            
+            // Queue the message to be sent when the connection is established
+            setTimeout(() => {
+                if (callSocket && callSocket.readyState === WebSocket.OPEN) {
+                    console.log("Sending queued message:", message);
+                    callSocket.send(JSON.stringify(message));
+                } else {
+                    console.error("Failed to send queued message, WebSocket still not connected");
+                }
+            }, 1000);
+            
+            return false;
+        }
+        
+        try {
+            callSocket.send(JSON.stringify(message));
+            return true;
+        } catch (error) {
+            console.error("Error sending WebSocket message:", error);
+            return false;
+        }
+    }
+    
+    // Connect to WebSocket when the page loads
+    connectWebSocket();
+    
+    // Event listeners
+    document.addEventListener('DOMContentLoaded', function() {
+        console.log("DOM loaded, initializing UI elements");
+        
+        // Re-get all UI elements to ensure they're properly initialized
+        callButton = document.getElementById('call-button');
+        hangupButton = document.getElementById('hangup-button');
+        muteButton = document.getElementById('mute-button');
+        testMicButton = document.getElementById('test-mic-button');
+        micTestResult = document.getElementById('mic-test-result');
+        callStatus = document.getElementById('call-status');
+        remoteAudio = document.getElementById('remote-audio');
+        localAudio = document.getElementById('local-audio');
+        callPopup = document.getElementById('call-popup');
+        acceptCallBtn = document.getElementById('accept-call-btn');
+        rejectCallBtn = document.getElementById('reject-call-btn');
+        
+        // Log UI elements to verify they're properly initialized
+        console.log("UI elements initialized:", {
+            callButton,
+            hangupButton,
+            muteButton,
+            testMicButton,
+            callStatus,
+            callPopup,
+            acceptCallBtn,
+            rejectCallBtn
+        });
+        
+        callButton.addEventListener('click', startCall);
+        hangupButton.addEventListener('click', endCall);
+        muteButton.addEventListener('click', toggleMute);
+        testMicButton.addEventListener('click', testMicrophone);
+        
+        // Make sure these event listeners are properly attached
+        console.log("Setting up accept/reject button listeners");
+        
+        if (acceptCallBtn) {
+            acceptCallBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                console.log("Accept button clicked, incomingCallData:", window.incomingCallData);
+                acceptIncomingCall();
+            });
+        } else {
+            console.error("Accept call button not found!");
+        }
+        
+        if (rejectCallBtn) {
+            rejectCallBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                console.log("Reject button clicked");
+                rejectIncomingCall();
+            });
+        } else {
+            console.error("Reject call button not found!");
+        }
+    });
+    
+    // Show incoming call popup
+    function showIncomingCallPopup(data) {
+        // Validate that data contains a valid offer
+        if (!data || !data.offer) {
+            console.error("Invalid call data received:", data);
+            callStatus.textContent = "Invalid call data received";
+            callStatus.className = "badge bg-danger";
+            return;
+        }
+        
+        console.log("Setting incomingCallData:", data);
+        window.incomingCallData = data;
+        
+        // Make sure the popup element exists
+        if (!callPopup) {
+            console.error("Call popup element not found!");
+            callPopup = document.getElementById('call-popup');
+            if (!callPopup) {
+                console.error("Still can't find call popup element!");
+                return;
+            }
+        }
+        
+        // Make sure the popup is visible
+        callPopup.style.display = 'flex';
+        
+        // Make sure the avatar element exists
+        const avatarElement = document.querySelector('#call-popup .avatar-lg');
+        if (avatarElement) {
+            avatarElement.classList.add('ringing');
+        } else {
+            console.error("Avatar element not found in call popup!");
+        }
+        
+        // Play ringtone
+        playRingtone();
+        
+        // Auto-reject call after 30 seconds if not answered
+        setTimeout(() => {
+            if (callPopup && callPopup.style.display !== 'none') {
+                rejectIncomingCall();
+            }
+        }, 30000);
+    }
+    
+    // Hide call popup
+    function hideCallPopup() {
+        if (!callPopup) {
+            console.error("Call popup element not found when trying to hide it!");
+            callPopup = document.getElementById('call-popup');
+            if (!callPopup) {
+                console.error("Still can't find call popup element!");
+                return;
+            }
+        }
+        
+        callPopup.style.display = 'none';
+        
+        const avatarElement = document.querySelector('#call-popup .avatar-lg');
+        if (avatarElement) {
+            avatarElement.classList.remove('ringing');
+        } else {
+            console.error("Avatar element not found in call popup when trying to hide it!");
+        }
+        
+        // Don't clear incomingCallData here, as it might be needed for acceptIncomingCall
+    }
+    
+    // Play ringtone
+    function playRingtone() {
+        try {
+            ringtoneAudio.currentTime = 0;
+            ringtoneAudio.play().catch(e => console.error("Error playing ringtone:", e));
+        } catch (e) {
+            console.error("Error playing ringtone:", e);
+        }
+    }
+    
+    // Stop ringtone
+    function stopRingtone() {
+        try {
+            ringtoneAudio.pause();
+            ringtoneAudio.currentTime = 0;
+        } catch (e) {
+            console.error("Error stopping ringtone:", e);
+        }
+    }
+    
+    // Accept incoming call
+    async function acceptIncomingCall() {
+        console.log("acceptIncomingCall called, incomingCallData:", window.incomingCallData);
+        
+        // Get the elements directly from the DOM to ensure they're available
+        const callButton = document.getElementById('call-button');
+        const hangupButton = document.getElementById('hangup-button');
+        const muteButton = document.getElementById('mute-button');
+        const callStatus = document.getElementById('call-status');
+        
+        try {
+            // Check if we have valid incoming call data
+            if (!window.incomingCallData || !window.incomingCallData.offer) {
+                console.error("No valid offer data available:", window.incomingCallData);
+                
+                // If we're coming from a notification, we might need to wait for the offer
+                if (fromNotification && waitingForOffer) {
+                    console.log("Still waiting for offer data from notification...");
+                    callStatus.textContent = "Waiting for call data...";
+                    callStatus.className = "badge bg-warning";
+                    
+                    // We'll return and let the onmessage handler call this function again when data arrives
+                    return;
+                }
+                
+                callStatus.textContent = "Error: No valid call data";
+                callStatus.className = "badge bg-danger";
+                
+                // Show error message
+                const errorDiv = document.querySelector('.alert-danger') || document.createElement('div');
+                errorDiv.className = 'alert alert-danger mt-3';
+                errorDiv.innerHTML = `
+                    <strong>Error accepting call:</strong> 
+                    <p>No valid call data available. The caller may have ended the call.</p>
+                    <p>You can try calling them back.</p>
+                `;
+                
+                if (!document.querySelector('.alert-danger')) {
+                    document.querySelector('.call-controls').after(errorDiv);
+                }
+                
+                return;
+            }
+            
+            stopRingtone();
+            hideCallPopup();
+            
+            callStatus.textContent = "Accepting call...";
+            callStatus.className = "badge bg-warning";
+            
+            // Get local media stream with explicit constraints
+            const constraints = {
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }
+            };
+            
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia(constraints);
+                localAudio.srcObject = localStream;
+            } catch (err) {
+                console.error("Error getting user media:", err);
+                
+                // Send call-ended to the caller
+                sendWebSocketMessage({
+                    'type': 'call-ended'
+                });
+                
+                if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+                    throw new Error("No microphone found. Please connect a microphone and try again.");
+                } else if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                    throw new Error("Microphone access denied. Please allow microphone access in your browser settings and try again.");
+                } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+                    throw new Error("Your microphone is being used by another application. Please close other applications and try again.");
+                } else {
+                    throw new Error(`Microphone error: ${err.message}`);
+                }
+            }
+            
+            // Create peer connection
+            console.log("Creating peer connection for accepting call");
+            createPeerConnection();
+            
+            if (!peerConnection) {
+                throw new Error("Failed to create peer connection");
+            }
+            
+            // Add local stream to peer connection
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+            
+            console.log("Setting remote description with offer:", window.incomingCallData.offer);
+            // Set remote description
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(window.incomingCallData.offer));
+            
+            // Create and send answer
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+            
+            // Make sure we're sending the full offer object
+            const offerToSend = {
+                type: answer.type,
+                sdp: answer.sdp
+            };
+
+            console.log("Sending answer:", offerToSend);
+            sendWebSocketMessage({
+                'type': 'answer',
+                'answer': offerToSend
+            });
+            
+            callButton.disabled = true;
+            hangupButton.disabled = false;
+            muteButton.disabled = false;
+            
+        } catch (error) {
+            console.error("Error accepting call:", error);
+            callStatus.textContent = "Error: " + error.message;
+            callStatus.className = "badge bg-danger";
+            
+            // Show detailed error message
+            const errorDiv = document.querySelector('.alert-danger') || document.createElement('div');
+            errorDiv.className = 'alert alert-danger mt-3';
+            errorDiv.innerHTML = `
+                <strong>Error accepting call:</strong> 
+                <p>${error.message}</p>
+                <p>Troubleshooting steps:</p>
+                <ul>
+                    <li>Make sure your microphone is properly connected</li>
+                    <li>Check browser permissions for microphone access</li>
+                    <li>Close other applications that might be using your microphone</li>
+                    <li>Try using a different browser</li>
+                </ul>
+            `;
+            
+            if (!document.querySelector('.alert-danger')) {
+                document.querySelector('.call-controls').after(errorDiv);
+            }
+        }
+    }
+    
+    // Reject incoming call
+    function rejectIncomingCall() {
+        console.log("Rejecting incoming call");
+        
+        // Get the call status element directly from the DOM
+        const callStatus = document.getElementById('call-status');
+        
+        stopRingtone();
+        hideCallPopup();
+        
+        // Send call-ended to the caller
+        if (callSocket && callSocket.readyState === WebSocket.OPEN) {
+            console.log("Sending call-ended message");
+            sendWebSocketMessage({
+                'type': 'call-ended'
+            });
+        } else {
+            console.error("Cannot send call-ended message, WebSocket not connected");
+        }
+        
+        callStatus.textContent = "Call rejected";
+        callStatus.className = "badge bg-secondary";
+    }
+    
+    // Check if microphone is accessible
+    async function checkMicrophoneAccess() {
+        try {
+            // Just check if we can get devices
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const audioInputs = devices.filter(device => device.kind === 'audioinput');
+            
+            if (audioInputs.length === 0) {
+                // No microphone found
+                callStatus.textContent = "No microphone detected";
+                callStatus.className = "badge bg-danger";
+                callButton.disabled = true;
+                
+                // Show error message
+                const alertDiv = document.createElement('div');
+                alertDiv.className = 'alert alert-danger mt-3';
+                alertDiv.innerHTML = `
+                    <strong>No microphone detected!</strong> 
+                    <p>Please connect a microphone to your device and refresh this page.</p>
+                `;
+                document.querySelector('.call-controls').after(alertDiv);
+            }
+        } catch (error) {
+            console.error("Error checking microphone:", error);
+        }
+    }
+    
+    // Functions
+    async function startCall() {
+        try {
+            // Stop any microphone test that might be running
+            stopMicrophoneTest();
+            
+            callStatus.textContent = "Requesting microphone access...";
+            
+            // Get list of audio devices
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const audioInputs = devices.filter(device => device.kind === 'audioinput');
+            
+            if (audioInputs.length === 0) {
+                throw new Error("No microphone detected on your device");
+            }
+            
+            // Get local media stream with explicit constraints
+            const constraints = {
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }
+            };
+            
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia(constraints);
+            } catch (err) {
+                console.error("Error getting user media:", err);
+                
+                if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+                    throw new Error("No microphone found. Please connect a microphone and try again.");
+                } else if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                    throw new Error("Microphone access denied. Please allow microphone access in your browser settings and try again.");
+                } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+                    throw new Error("Your microphone is being used by another application. Please close other applications and try again.");
+                } else {
+                    throw new Error(`Microphone error: ${err.message}`);
+                }
+            }
+            
+            localAudio.srcObject = localStream;
+            
+            // Create peer connection
+            createPeerConnection();
+            
+            // Add local stream to peer connection
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+            
+            // Create and send offer
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            
+            // Make sure we're sending the full offer object
+            const offerToSend = {
+                type: offer.type,
+                sdp: offer.sdp
+            };
+
+            console.log("Sending offer:", offerToSend);
+            sendWebSocketMessage({
+                'type': 'offer',
+                'offer': offerToSend
+            });
+            
+            callStatus.textContent = "Calling...";
+            callStatus.className = "badge bg-warning";
+            callButton.disabled = true;
+            hangupButton.disabled = false;
+            muteButton.disabled = false;
+            
+        } catch (error) {
+            console.error("Error starting call:", error);
+            callStatus.textContent = "Error: " + error.message;
+            callStatus.className = "badge bg-danger";
+            
+            // Show detailed error message
+            const errorDiv = document.querySelector('.alert-danger') || document.createElement('div');
+            errorDiv.className = 'alert alert-danger mt-3';
+            errorDiv.innerHTML = `
+                <strong>Error starting call:</strong> 
+                <p>${error.message}</p>
+                <p>Troubleshooting steps:</p>
+                <ul>
+                    <li>Make sure your microphone is properly connected</li>
+                    <li>Check browser permissions for microphone access</li>
+                    <li>Close other applications that might be using your microphone</li>
+                    <li>Try using a different browser</li>
+                </ul>
+            `;
+            
+            if (!document.querySelector('.alert-danger')) {
+                document.querySelector('.call-controls').after(errorDiv);
+            }
+        }
+    }
+    
+    function createPeerConnection() {
+        try {
+            console.log("Creating new RTCPeerConnection with config:", configuration);
+            
+            // Close any existing connection
+            if (peerConnection) {
+                console.log("Closing existing peer connection before creating a new one");
+                peerConnection.close();
+            }
+            
+            peerConnection = new RTCPeerConnection(configuration);
+            
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    console.log("Sending ICE candidate:", event.candidate);
+                    sendWebSocketMessage({
+                        'type': 'ice-candidate',
+                        'candidate': event.candidate
+                    });
+                }
+            };
+            
+            peerConnection.ontrack = event => {
+                console.log("Received remote track:", event.streams[0]);
+                remoteAudio.srcObject = event.streams[0];
+                callStatus.textContent = "Connected";
+                callStatus.className = "badge bg-success";
+            };
+            
+            peerConnection.oniceconnectionstatechange = event => {
+                console.log("ICE connection state changed to:", peerConnection.iceConnectionState);
+                if (peerConnection.iceConnectionState === 'disconnected' || 
+                    peerConnection.iceConnectionState === 'failed' || 
+                    peerConnection.iceConnectionState === 'closed') {
+                    handleCallEnded();
+                }
+            };
+            
+            peerConnection.onicegatheringstatechange = event => {
+                console.log("ICE gathering state changed to:", peerConnection.iceGatheringState);
+            };
+            
+            peerConnection.onsignalingstatechange = event => {
+                console.log("Signaling state changed to:", peerConnection.signalingState);
+            };
+            
+            peerConnection.onconnectionstatechange = event => {
+                console.log("Connection state changed to:", peerConnection.connectionState);
+                if (peerConnection.connectionState === 'connected') {
+                    callStatus.textContent = "Connected";
+                    callStatus.className = "badge bg-success";
+                } else if (peerConnection.connectionState === 'disconnected' || 
+                           peerConnection.connectionState === 'failed' || 
+                           peerConnection.connectionState === 'closed') {
+                    handleCallEnded();
+                }
+            };
+            
+            return peerConnection;
+        } catch (error) {
+            console.error("Error creating peer connection:", error);
+            callStatus.textContent = "Connection error";
+            callStatus.className = "badge bg-danger";
+            return null;
+        }
+    }
+    
+    async function handleAnswer(data) {
+        if (!data || !data.answer) {
+            console.error("Invalid answer data received:", data);
+            callStatus.textContent = "Invalid answer data";
+            callStatus.className = "badge bg-danger";
+            return;
+        }
+        
+        try {
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+            callStatus.textContent = "Connected";
+            callStatus.className = "badge bg-success";
+        } catch (error) {
+            console.error("Error setting remote description:", error);
+            callStatus.textContent = "Connection error";
+            callStatus.className = "badge bg-danger";
+        }
+    }
+    
+    async function handleIceCandidate(data) {
+        if (!peerConnection) {
+            console.error("No peer connection available");
+            return;
+        }
+        
+        if (!data || !data.candidate) {
+            console.error("Invalid ICE candidate data:", data);
+            return;
+        }
+        
+        try {
+            await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+        } catch (error) {
+            console.error("Error adding ICE candidate:", error);
+        }
+    }
+    
+    function handleCallEnded() {
+        callStatus.textContent = "Call ended";
+        callStatus.className = "badge bg-secondary";
+        
+        // Clean up
+        if (peerConnection) {
+            peerConnection.close();
+            peerConnection = null;
+        }
+        
+        if (localStream) {
+            localStream.getTracks().forEach(track => track.stop());
+            localStream = null;
+        }
+        
+        remoteAudio.srcObject = null;
+        localAudio.srcObject = null;
+        
+        callButton.disabled = false;
+        hangupButton.disabled = true;
+        muteButton.disabled = true;
+        
+        // Reset mute button
+        isMuted = false;
+        muteButton.innerHTML = '<i class="fas fa-microphone"></i> Mute';
+    }
+    
+    function endCall() {
+        sendWebSocketMessage({
+            'type': 'call-ended'
+        });
+        
+        handleCallEnded();
+    }
+    
+    function toggleMute() {
+        if (!localStream) return;
+        
+        isMuted = !isMuted;
+        localStream.getAudioTracks().forEach(track => {
+            track.enabled = !isMuted;
+        });
+        
+        if (isMuted) {
+            muteButton.innerHTML = '<i class="fas fa-microphone-slash"></i> Unmute';
+        } else {
+            muteButton.innerHTML = '<i class="fas fa-microphone"></i> Mute';
+        }
+    }
+    
+    // Test microphone function
+    async function testMicrophone() {
+        try {
+            // Stop any previous test
+            stopMicrophoneTest();
+            
+            // Update UI
+            testMicButton.disabled = true;
+            testMicButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing...';
+            micTestResult.style.display = 'block';
+            micTestResult.className = 'alert alert-info mb-3';
+            micTestResult.textContent = 'Testing your microphone...';
+            
+            // Get microphone access
+            const constraints = {
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }
+            };
+            
+            testStream = await navigator.mediaDevices.getUserMedia(constraints);
+            
+            // Create audio context and analyser
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const microphone = audioContext.createMediaStreamSource(testStream);
+            audioAnalyser = audioContext.createAnalyser();
+            audioAnalyser.fftSize = 256;
+            microphone.connect(audioAnalyser);
+            
+            const bufferLength = audioAnalyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            
+            // Start monitoring audio levels
+            let silenceCounter = 0;
+            let soundDetected = false;
+            
+            testInterval = setInterval(() => {
+                audioAnalyser.getByteFrequencyData(dataArray);
+                
+                // Calculate average volume
+                let sum = 0;
+                for (let i = 0; i < bufferLength; i++) {
+                    sum += dataArray[i];
+                }
+                const average = sum / bufferLength;
+                
+                // Update UI based on volume
+                if (average > 10) {  // Threshold for sound detection
+                    soundDetected = true;
+                    micTestResult.className = 'alert alert-success mb-3';
+                    micTestResult.innerHTML = `
+                        <strong>Microphone working!</strong> 
+                        <p>Sound detected. Your microphone is working properly.</p>
+                        <div class="progress">
+                            <div class="progress-bar bg-success" role="progressbar" style="width: ${Math.min(100, average * 3)}%" 
+                                aria-valuenow="${average}" aria-valuemin="0" aria-valuemax="100"></div>
+                        </div>
+                    `;
+                    silenceCounter = 0;
+                } else {
+                    silenceCounter++;
+                    
+                    // If we've been silent for a while and never detected sound
+                    if (silenceCounter > 20 && !soundDetected) {
+                        micTestResult.className = 'alert alert-warning mb-3';
+                        micTestResult.innerHTML = `
+                            <strong>No sound detected!</strong> 
+                            <p>Try speaking or making noise. If this persists, your microphone might not be working properly.</p>
+                        `;
+                    }
+                }
+            }, 100);
+            
+            // Stop test after 10 seconds
+            setTimeout(() => {
+                if (testInterval) {
+                    stopMicrophoneTest();
+                    
+                    if (!soundDetected) {
+                        micTestResult.className = 'alert alert-danger mb-3';
+                        micTestResult.innerHTML = `
+                            <strong>Microphone test failed!</strong> 
+                            <p>No sound was detected during the test. Please check your microphone settings and try again.</p>
+                        `;
+                    } else {
+                        micTestResult.className = 'alert alert-success mb-3';
+                        micTestResult.innerHTML = `
+                            <strong>Microphone test completed!</strong> 
+                            <p>Your microphone is working properly. You can now start a call.</p>
+                        `;
+                    }
+                }
+            }, 10000);
+            
+        } catch (error) {
+            console.error("Error testing microphone:", error);
+            micTestResult.className = 'alert alert-danger mb-3';
+            
+            if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
+                micTestResult.innerHTML = `
+                    <strong>No microphone found!</strong> 
+                    <p>Please connect a microphone to your device and try again.</p>
+                `;
+            } else if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+                micTestResult.innerHTML = `
+                    <strong>Microphone access denied!</strong> 
+                    <p>Please allow microphone access in your browser settings and try again.</p>
+                `;
+            } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
+                micTestResult.innerHTML = `
+                    <strong>Microphone in use!</strong> 
+                    <p>Your microphone is being used by another application. Please close other applications and try again.</p>
+                `;
+            } else {
+                micTestResult.innerHTML = `
+                    <strong>Microphone error!</strong> 
+                    <p>${error.message}</p>
+                `;
+            }
+        } finally {
+            testMicButton.disabled = false;
+            testMicButton.innerHTML = '<i class="fas fa-microphone-alt"></i> Test Microphone';
+        }
+    }
+    
+    function stopMicrophoneTest() {
+        if (testInterval) {
+            clearInterval(testInterval);
+            testInterval = null;
+        }
+        
+        if (audioContext) {
+            audioContext.close();
+            audioContext = null;
+        }
+        
+        if (testStream) {
+            testStream.getTracks().forEach(track => track.stop());
+            testStream = null;
+        }
+    }
+    
+    // Clean up on page unload
+    window.addEventListener('beforeunload', function() {
+        // Stop any microphone test
+        stopMicrophoneTest();
+        
+        if (peerConnection) {
+            sendWebSocketMessage({
+                'type': 'call-ended'
+            });
+            
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+            }
+        }
+    });
+
+    // If we're coming from a notification but don't receive an offer within 10 seconds,
+    // we'll assume the caller has already ended the call
+    function handleMissedNotificationCall() {
+        waitingForOffer = false;
+        callStatus.textContent = "Caller has ended the call";
+        callStatus.className = "badge bg-secondary";
+        
+        // Show a message to the user
+        const errorDiv = document.querySelector('.alert-info') || document.createElement('div');
+        errorDiv.className = 'alert alert-info mt-3';
+        errorDiv.innerHTML = `
+            <strong>Call ended</strong> 
+            <p>The caller has already ended the call or the call data was lost.</p>
+            <p>You can try calling them back.</p>
+        `;
+        
+        if (!document.querySelector('.alert-info')) {
+            document.querySelector('.call-controls').after(errorDiv);
+        }
+    }
+</script>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* Call Popup Styles */
+    .call-popup {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0, 0, 0, 0.7);
+        z-index: 1000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    
+    .call-popup-content {
+        background-color: white;
+        border-radius: 10px;
+        padding: 30px;
+        width: 350px;
+        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+        animation: popup-animation 0.3s ease-out;
+    }
+    
+    @keyframes popup-animation {
+        0% { transform: scale(0.8); opacity: 0; }
+        100% { transform: scale(1); opacity: 1; }
+    }
+    
+    .call-popup-buttons {
+        display: flex;
+        justify-content: center;
+    }
+    
+    /* Ringing animation for avatar */
+    @keyframes ringing {
+        0% { transform: rotate(-5deg); }
+        25% { transform: rotate(5deg); }
+        50% { transform: rotate(-5deg); }
+        75% { transform: rotate(5deg); }
+        100% { transform: rotate(-5deg); }
+    }
+    
+    .ringing {
+        animation: ringing 0.5s infinite;
+    }
+</style>
+{% endblock %} 
