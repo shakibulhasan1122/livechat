@@ -101,7 +101,9 @@ AUTH_PASSWORD_VALIDATORS = [
         'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
     },
 ]
-
+CSRF_TRUSTED_ORIGINS = [
+    "https://livechat-production-989b.up.railway.app"
+]
 
 # Internationalization
 # https://docs.djangoproject.com/en/5.1/topics/i18n/
